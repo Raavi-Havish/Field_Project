@@ -3,7 +3,6 @@ import base64
 import sqlite3
 import numpy as np
 import cv2
-import mediapipe as mp
 from flask import Flask, render_template, request, redirect, url_for, session, flash, jsonify
 from functools import wraps
 
@@ -16,9 +15,8 @@ FACES_DIR = 'static/faces'
 os.makedirs('database', exist_ok=True)
 os.makedirs(FACES_DIR, exist_ok=True)
 
-# ✅ Correct mediapipe setup (FINAL FIX)
-mp_face_detection = mp.solutions.face_detection
-face_detection_model = mp_face_detection.FaceDetection(min_detection_confidence=0.5)
+# ✅ OpenCV face detector (NO mediapipe)
+face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
 
 def init_db():
     conn = sqlite3.connect(DB_PATH)
@@ -73,25 +71,16 @@ def dashboard():
 
 # ---------- FACE DETECTION ----------
 def detect_single_face(img):
-    rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-    results = face_detection_model.process(rgb)
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    faces = face_cascade.detectMultiScale(gray, 1.3, 5)
 
-    if not results.detections:
+    if len(faces) == 0:
         return None
-
-    if len(results.detections) > 1:
+    if len(faces) > 1:
         return "multiple"
 
-    bbox = results.detections[0].location_data.relative_bounding_box
-    h, w, _ = img.shape
-
-    x = int(bbox.xmin * w)
-    y = int(bbox.ymin * h)
-    w_box = int(bbox.width * w)
-    h_box = int(bbox.height * h)
-
-    face = img[y:y+h_box, x:x+w_box]
-    return face
+    (x, y, w, h) = faces[0]
+    return img[y:y+h, x:x+w]
 
 # ---------- IMAGE COMPARISON ----------
 def compare_faces(img1, img2):
@@ -101,8 +90,7 @@ def compare_faces(img1, img2):
     hist1 = cv2.calcHist([img1], [0], None, [256], [0,256])
     hist2 = cv2.calcHist([img2], [0], None, [256], [0,256])
 
-    score = cv2.compareHist(hist1, hist2, cv2.HISTCMP_CORREL)
-    return score
+    return cv2.compareHist(hist1, hist2, cv2.HISTCMP_CORREL)
 
 # ---------- REGISTER ----------
 @app.route('/register', methods=['GET', 'POST'])
