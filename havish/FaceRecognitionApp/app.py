@@ -1,10 +1,9 @@
 import os
 import base64
-import pickle
 import sqlite3
 import numpy as np
 import cv2
-import face_recognition
+import mediapipe as mp
 from flask import Flask, render_template, request, redirect, url_for, session, flash, jsonify
 from functools import wraps
 
@@ -14,9 +13,12 @@ app.secret_key = 'supersecretkey_face_rec_app_007'
 DB_PATH = 'database/face_recognition.db'
 FACES_DIR = 'static/faces'
 
-# Ensure directories exist
 os.makedirs('database', exist_ok=True)
 os.makedirs(FACES_DIR, exist_ok=True)
+
+# Mediapipe setup
+mp_face = mp.solutions.face_detection
+face_detection = mp_face.FaceDetection(min_detection_confidence=0.5)
 
 def init_db():
     conn = sqlite3.connect(DB_PATH)
@@ -26,7 +28,6 @@ def init_db():
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT NOT NULL,
             image_path TEXT NOT NULL,
-            encoding BLOB NOT NULL,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
@@ -50,15 +51,11 @@ def index():
 @app.route('/login', methods=['GET', 'POST'])
 def login():
     if request.method == 'POST':
-        username = request.form.get('username')
-        password = request.form.get('password')
-        
-        if username == 'havish' and password == 'havishfp007':
+        if request.form.get('username') == 'havish' and request.form.get('password') == 'havishfp007':
             session['admin_logged_in'] = True
             return redirect(url_for('dashboard'))
         else:
-            flash('Invalid credentials. Please try again.', 'error')
-            
+            flash('Invalid credentials', 'error')
     return render_template('login.html')
 
 @app.route('/logout')
@@ -70,168 +67,111 @@ def logout():
 @login_required
 def dashboard():
     conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute('SELECT id, name, image_path, created_at FROM users ORDER BY created_at DESC')
-    users = c.fetchall()
+    users = conn.execute('SELECT id, name, image_path FROM users').fetchall()
     conn.close()
     return render_template('dashboard.html', users=users)
 
+# ---------- FACE DETECTION ----------
+def detect_single_face(img):
+    rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+    results = face_detection.process(rgb)
+
+    if not results.detections:
+        return None
+
+    if len(results.detections) > 1:
+        return "multiple"
+
+    bbox = results.detections[0].location_data.relative_bounding_box
+    h, w, _ = img.shape
+
+    x = int(bbox.xmin * w)
+    y = int(bbox.ymin * h)
+    w_box = int(bbox.width * w)
+    h_box = int(bbox.height * h)
+
+    face = img[y:y+h_box, x:x+w_box]
+    return face
+
+# ---------- IMAGE COMPARISON ----------
+def compare_faces(img1, img2):
+    img1 = cv2.resize(img1, (200, 200))
+    img2 = cv2.resize(img2, (200, 200))
+
+    hist1 = cv2.calcHist([img1], [0], None, [256], [0,256])
+    hist2 = cv2.calcHist([img2], [0], None, [256], [0,256])
+
+    score = cv2.compareHist(hist1, hist2, cv2.HISTCMP_CORREL)
+    return score
+
+# ---------- REGISTER ----------
 @app.route('/register', methods=['GET', 'POST'])
 @login_required
 def register():
     if request.method == 'POST':
         name = request.form.get('name')
         image_data = request.form.get('image')
-        
-        if not name or not image_data:
-            return jsonify({'success': False, 'message': 'Name and image are required.'})
-        
-        try:
-            # Parse base64 image data from data URI
-            header, encoded = image_data.split(",", 1)
-            data = base64.b64decode(encoded)
-            
-            # Convert bytes to numpy array for OpenCV
-            nparr = np.frombuffer(data, np.uint8)
-            img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-            
-            # Convert BGR (OpenCV) to RGB (face_recognition)
-            rgb_img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-            
-            # Find face locations
-            face_locations = face_recognition.face_locations(rgb_img)
-            
-            if len(face_locations) == 0:
-                return jsonify({'success': False, 'message': 'No face detected. Please ensure your face is clearly visible.'})
-            elif len(face_locations) > 1:
-                return jsonify({'success': False, 'message': 'Multiple faces detected. Please ensure only one face is in the frame.'})
-            
-            # Generate encoding
-            encoding = face_recognition.face_encodings(rgb_img, face_locations)[0]
-            
-            # Save face image to disk
-            safe_name = "".join(c for c in name if c.isalnum() or c in (' ', '_')).replace(' ', '_')
-            image_filename = f"{safe_name}_{os.urandom(4).hex()}.jpg"
-            image_path = os.path.join(FACES_DIR, image_filename)
-            cv2.imwrite(image_path, img)
-            
-            # Save user data to DB
-            encoding_bytes = pickle.dumps(encoding)
-            conn = sqlite3.connect(DB_PATH)
-            c = conn.cursor()
-            c.execute('INSERT INTO users (name, image_path, encoding) VALUES (?, ?, ?)', (name, image_path, encoding_bytes))
-            conn.commit()
-            conn.close()
-            
-            return jsonify({'success': True, 'message': f'User "{name}" registered successfully!'})
-            
-        except Exception as e:
-            print("Error during registration:", str(e))
-            return jsonify({'success': False, 'message': 'Internal server error during registration.'})
+
+        header, encoded = image_data.split(",", 1)
+        img = cv2.imdecode(np.frombuffer(base64.b64decode(encoded), np.uint8), cv2.IMREAD_COLOR)
+
+        face = detect_single_face(img)
+
+        if face is None:
+            return jsonify({'success': False, 'message': 'No face detected'})
+        if face == "multiple":
+            return jsonify({'success': False, 'message': 'Multiple faces detected'})
+
+        filename = f"{name}_{os.urandom(4).hex()}.jpg"
+        path = os.path.join(FACES_DIR, filename)
+        cv2.imwrite(path, face)
+
+        conn = sqlite3.connect(DB_PATH)
+        conn.execute('INSERT INTO users (name, image_path) VALUES (?, ?)', (name, path))
+        conn.commit()
+        conn.close()
+
+        return jsonify({'success': True, 'message': 'User registered'})
 
     return render_template('register.html')
 
-@app.route('/delete_user/<int:id>', methods=['POST'])
-@login_required
-def delete_user(id):
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute('SELECT image_path FROM users WHERE id = ?', (id,))
-    user = c.fetchone()
-    if user:
-        image_path = user[0]
-        if os.path.exists(image_path):
-            os.remove(image_path)
-        c.execute('DELETE FROM users WHERE id = ?', (id,))
-        conn.commit()
-        flash('User deleted successfully.', 'success')
-    conn.close()
-    return redirect(url_for('dashboard'))
-
-@app.route('/update_user/<int:id>', methods=['GET', 'POST'])
-@login_required
-def update_user(id):
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    
-    if request.method == 'POST':
-        new_name = request.form.get('name')
-        if new_name:
-            c.execute('UPDATE users SET name = ? WHERE id = ?', (new_name, id))
-            conn.commit()
-            flash('User updated successfully.', 'success')
-            conn.close()
-            return redirect(url_for('dashboard'))
-            
-    c.execute('SELECT id, name FROM users WHERE id = ?', (id,))
-    user = c.fetchone()
-    conn.close()
-    
-    if not user:
-        flash('User not found.', 'error')
-        return redirect(url_for('dashboard'))
-        
-    return render_template('update_user.html', user=user)
-
+# ---------- VERIFY ----------
 @app.route('/verify', methods=['GET', 'POST'])
 def verify():
     if request.method == 'POST':
         image_data = request.form.get('image')
-        if not image_data:
-            return jsonify({'success': False, 'message': 'No image provided.'})
-            
-        try:
-            # Parse base64 image data
-            header, encoded = image_data.split(",", 1)
-            data = base64.b64decode(encoded)
-            
-            nparr = np.frombuffer(data, np.uint8)
-            img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-            rgb_img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-            
-            # Find face in captured image
-            face_locations = face_recognition.face_locations(rgb_img)
-            
-            if len(face_locations) == 0:
-                return jsonify({'success': False, 'message': 'No face detected in the frame.'})
-            elif len(face_locations) > 1:
-                return jsonify({'success': False, 'message': 'Multiple faces detected.'})
-                
-            # Get the encoding for the face
-            unknown_encoding = face_recognition.face_encodings(rgb_img, face_locations)[0]
-            
-            # Fetch all stored users
-            conn = sqlite3.connect(DB_PATH)
-            c = conn.cursor()
-            c.execute('SELECT name, encoding FROM users')
-            users = c.fetchall()
-            conn.close()
-            
-            if not users:
-                return jsonify({'success': False, 'message': 'No registered users in the database.'})
-                
-            known_encodings = []
-            known_names = []
-            for user in users:
-                known_names.append(user[0])
-                known_encodings.append(pickle.loads(user[1]))
-                
-            # Compare face
-            matches = face_recognition.compare_faces(known_encodings, unknown_encoding, tolerance=0.45)
-            face_distances = face_recognition.face_distance(known_encodings, unknown_encoding)
-            
-            best_match_index = np.argmin(face_distances)
-            if matches[best_match_index]:
-                matched_name = known_names[best_match_index]
-                return jsonify({'success': True, 'message': f'User Identified: {matched_name}'})
-            else:
-                return jsonify({'success': False, 'message': 'Face Not Matched'})
-                
-        except Exception as e:
-            print("Error during verification:", str(e))
-            return jsonify({'success': False, 'message': 'Internal server error during verification.'})
+
+        header, encoded = image_data.split(",", 1)
+        img = cv2.imdecode(np.frombuffer(base64.b64decode(encoded), np.uint8), cv2.IMREAD_COLOR)
+
+        face = detect_single_face(img)
+
+        if face is None:
+            return jsonify({'success': False, 'message': 'No face detected'})
+        if face == "multiple":
+            return jsonify({'success': False, 'message': 'Multiple faces detected'})
+
+        conn = sqlite3.connect(DB_PATH)
+        users = conn.execute('SELECT name, image_path FROM users').fetchall()
+        conn.close()
+
+        best_score = -1
+        best_user = None
+
+        for name, path in users:
+            saved = cv2.imread(path)
+            score = compare_faces(face, saved)
+
+            if score > best_score:
+                best_score = score
+                best_user = name
+
+        if best_score > 0.7:
+            return jsonify({'success': True, 'message': f'User: {best_user}'})
+        else:
+            return jsonify({'success': False, 'message': 'No match'})
 
     return render_template('verify.html')
 
 if __name__ == '__main__':
-    app.run(debug=True, port=5000)
+    app.run(host="0.0.0.0", port=10000)
