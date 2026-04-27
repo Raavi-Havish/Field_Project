@@ -3,7 +3,7 @@ import base64
 import sqlite3
 import numpy as np
 import cv2
-import mediapipe as mp
+from mediapipe.python.solutions import face_detection  # ✅ FIXED IMPORT
 from flask import Flask, render_template, request, redirect, url_for, session, flash, jsonify
 from functools import wraps
 
@@ -16,9 +16,8 @@ FACES_DIR = 'static/faces'
 os.makedirs('database', exist_ok=True)
 os.makedirs(FACES_DIR, exist_ok=True)
 
-# Mediapipe setup
-mp_face = mp.solutions.face_detection
-face_detection = mp_face.FaceDetection(min_detection_confidence=0.5)
+# ✅ Mediapipe setup (fixed)
+face_detection_model = face_detection.FaceDetection(min_detection_confidence=0.5)
 
 def init_db():
     conn = sqlite3.connect(DB_PATH)
@@ -74,7 +73,7 @@ def dashboard():
 # ---------- FACE DETECTION ----------
 def detect_single_face(img):
     rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-    results = face_detection.process(rgb)
+    results = face_detection_model.process(rgb)  # ✅ FIXED
 
     if not results.detections:
         return None
