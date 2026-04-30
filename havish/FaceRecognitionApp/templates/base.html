@@ -35,10 +35,9 @@
                     </li>
                     {% if session.get('admin_logged_in') %}
                     <li class="nav-item">
-                        <a class="nav-link" href="{{ url_for('dashboard') }}">Dashboard</a>
-                    </li>
-                    <li class="nav-item">
-                        <a class="nav-link" href="{{ url_for('register') }}">Register User</a>
+                        <a class="nav-link" href="{{ url_for('dashboard') }}">
+                            <i class="fa-solid fa-shield-halved me-1"></i>Admin Panel
+                        </a>
                     </li>
                     <li class="nav-item ms-lg-3 mt-2 mt-lg-0">
                         <a class="btn btn-outline-danger btn-sm" href="{{ url_for('logout') }}">Logout</a>
