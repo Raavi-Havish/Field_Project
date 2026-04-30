@@ -9,10 +9,11 @@ from functools import wraps
 app = Flask(__name__)
 app.secret_key = 'supersecretkey_face_rec_app_007'
 
-DB_PATH = 'database/face_recognition.db'
+DB_PATH = '/tmp/face_recognition.db'
 FACES_DIR = 'static/faces'
 
-os.makedirs('database', exist_ok=True)
+# Ensure directories exist
+os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
 os.makedirs(FACES_DIR, exist_ok=True)
 
 
@@ -64,9 +65,41 @@ def logout():
 @login_required
 def dashboard():
     conn = sqlite3.connect(DB_PATH)
-    users = conn.execute('SELECT id, name, image_path FROM users').fetchall()
+    # Added created_at to avoid IndexError in template
+    users = conn.execute('SELECT id, name, image_path, created_at FROM users').fetchall()
     conn.close()
     return render_template('dashboard.html', users=users)
+
+@app.route('/delete_user/<int:id>', methods=['POST'])
+@login_required
+def delete_user(id):
+    conn = sqlite3.connect(DB_PATH)
+    user = conn.execute('SELECT image_path FROM users WHERE id = ?', (id,)).fetchone()
+    if user:
+        # We don't delete from /tmp as it's ephemeral, but we could
+        conn.execute('DELETE FROM users WHERE id = ?', (id,))
+        conn.commit()
+    conn.close()
+    flash('User deleted successfully', 'success')
+    return redirect(url_for('dashboard'))
+
+@app.route('/update_user/<int:id>', methods=['GET', 'POST'])
+@login_required
+def update_user(id):
+    # For now, just a placeholder or basic edit
+    if request.method == 'POST':
+        name = request.form.get('name')
+        conn = sqlite3.connect(DB_PATH)
+        conn.execute('UPDATE users SET name = ? WHERE id = ?', (name, id))
+        conn.commit()
+        conn.close()
+        flash('User updated', 'success')
+        return redirect(url_for('dashboard'))
+    
+    conn = sqlite3.connect(DB_PATH)
+    user = conn.execute('SELECT id, name FROM users WHERE id = ?', (id,)).fetchone()
+    conn.close()
+    return render_template('register.html', user=user) # Reuse register for edit
 
 # Global variable for Mediapipe model
 face_embedder = None
