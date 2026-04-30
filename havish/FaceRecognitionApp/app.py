@@ -87,19 +87,19 @@ def get_face_embedding(img):
         return None, f"Face recognition system error: {err}"
 
     try:
-        # detect() returns (boxes, kpss)
-        boxes, kpss = detector.detect(img)
+        # detect() returns a list of Face objects (each has .bbox, .confidence, .landmarks)
+        faces = detector.detect(img)
     except Exception as e:
         return None, f"Detection error: {e}"
 
-    if boxes is None or len(boxes) == 0:
+    if not faces or len(faces) == 0:
         return None, "No face detected. Ensure good lighting and face the camera directly."
-    if len(boxes) > 1:
+    if len(faces) > 1:
         return None, "Multiple faces detected. Please ensure only one face is visible."
 
     try:
-        # extract() takes the full image and the first detected face
-        embedding = recognizer.extract(img, kpss[0])
+        # ArcFace uses landmarks from detected face to extract normalized embedding
+        embedding = recognizer.get_normalized_embedding(img, faces[0].landmarks)
         return embedding, None
     except Exception as e:
         return None, f"Recognition error: {e}"
