@@ -26,9 +26,17 @@ def init_db():
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT NOT NULL,
             image_path TEXT NOT NULL,
+            embedding TEXT,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
+    
+    # Check if embedding column exists (for migrations)
+    try:
+        c.execute('SELECT embedding FROM users LIMIT 1')
+    except sqlite3.OperationalError:
+        c.execute('ALTER TABLE users ADD COLUMN embedding TEXT')
+        
     conn.commit()
     conn.close()
 
@@ -181,13 +189,17 @@ def register():
         if embedding == "multiple":
             return jsonify({'success': False, 'message': 'Multiple faces detected'})
 
-        # Save the original image (or we could save the embedding to DB for speed)
+        # Save the original image
         filename = f"{name}_{os.urandom(4).hex()}.jpg"
         path = os.path.join(FACES_DIR, filename)
         cv2.imwrite(path, img)
 
+        # Store embedding as JSON string for fast comparison
+        import json
+        embedding_str = json.dumps(embedding.tolist() if isinstance(embedding, np.ndarray) else embedding)
+
         conn = sqlite3.connect(DB_PATH)
-        conn.execute('INSERT INTO users (name, image_path) VALUES (?, ?)', (name, path))
+        conn.execute('INSERT INTO users (name, image_path, embedding) VALUES (?, ?, ?)', (name, path, embedding_str))
         conn.commit()
         conn.close()
 
@@ -212,30 +224,31 @@ def verify():
             return jsonify({'success': False, 'message': 'Multiple faces detected'})
 
         conn = sqlite3.connect(DB_PATH)
-        users = conn.execute('SELECT name, image_path FROM users').fetchall()
+        users = conn.execute('SELECT name, embedding FROM users').fetchall()
         conn.close()
 
         best_score = 0
         best_user = None
 
-        for name, path in users:
-            saved_img = cv2.imread(path)
-            if saved_img is None: continue
+        import json
+        for name, saved_embedding_str in users:
+            if not saved_embedding_str: continue
             
-            saved_embedding = get_face_embedding(saved_img)
-            
-            # Mediapipe returns a list (float_vector)
-            if saved_embedding and not isinstance(saved_embedding, str):
+            try:
+                saved_embedding = np.array(json.loads(saved_embedding_str))
                 score = compare_embeddings(embedding, saved_embedding)
+                
                 if score > best_score:
                     best_score = score
                     best_user = name
+            except:
+                continue
 
-        # Threshold for Mediapipe Face Embedder cosine similarity is usually around 0.8
-        if best_score > 0.8:
-            return jsonify({'success': True, 'message': f'User: {best_user}'})
+        # Threshold for Mediapipe (0.75-0.8 is usually accurate)
+        if best_score > 0.75:
+            return jsonify({'success': True, 'message': f'Verified: {best_user} ({int(best_score*100)}% match)'})
         else:
-            return jsonify({'success': False, 'message': 'No match'})
+            return jsonify({'success': False, 'message': 'Identity not recognized'})
 
     return render_template('verify.html')
 
