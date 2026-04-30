@@ -1,4 +1,5 @@
 import os
+import json
 import base64
 import sqlite3
 import numpy as np
@@ -12,12 +13,12 @@ app.secret_key = 'supersecretkey_face_rec_app_007'
 DB_PATH = '/tmp/face_recognition.db'
 FACES_DIR = 'static/faces'
 
-# Ensure directories exist
-os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+os.makedirs('/tmp', exist_ok=True)
 os.makedirs(FACES_DIR, exist_ok=True)
 
-
-
+# ─────────────────────────────────────────────
+# DATABASE
+# ─────────────────────────────────────────────
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
@@ -30,227 +31,214 @@ def init_db():
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
-    
-    # Check if embedding column exists (for migrations)
     try:
         c.execute('SELECT embedding FROM users LIMIT 1')
     except sqlite3.OperationalError:
         c.execute('ALTER TABLE users ADD COLUMN embedding TEXT')
-        
     conn.commit()
     conn.close()
 
 init_db()
 
+# ─────────────────────────────────────────────
+# AUTH
+# ─────────────────────────────────────────────
 def login_required(f):
     @wraps(f)
     def decorated_function(*args, **kwargs):
         if 'admin_logged_in' not in session:
+            flash('Please log in to access the admin panel.', 'warning')
             return redirect(url_for('login'))
         return f(*args, **kwargs)
     return decorated_function
 
+# ─────────────────────────────────────────────
+# FACE RECOGNITION (uniface — ONNX, no dlib)
+# ─────────────────────────────────────────────
+_detector = None
+_recognizer = None
+
+def get_models():
+    global _detector, _recognizer
+    if _detector is None or _recognizer is None:
+        try:
+            from uniface.detection import RetinaFace
+            from uniface.recognition import ArcFace
+            _detector = RetinaFace()
+            _recognizer = ArcFace()
+            print("UniFace models loaded successfully.")
+        except Exception as e:
+            print(f"CRITICAL: Failed to load UniFace models: {e}")
+    return _detector, _recognizer
+
+def get_face_embedding(img):
+    """Detect a single face and return its ArcFace embedding."""
+    if img is None:
+        return None, "Image is empty"
+
+    detector, recognizer = get_models()
+    if detector is None or recognizer is None:
+        return None, "Face recognition system initializing. Try again in a moment."
+
+    try:
+        # detect() returns (boxes, kpss)
+        boxes, kpss = detector.detect(img)
+    except Exception as e:
+        return None, f"Detection error: {e}"
+
+    if boxes is None or len(boxes) == 0:
+        return None, "No face detected. Ensure good lighting and face the camera directly."
+    if len(boxes) > 1:
+        return None, "Multiple faces detected. Please ensure only one face is visible."
+
+    try:
+        # extract() takes the full image and the first detected face
+        embedding = recognizer.extract(img, kpss[0])
+        return embedding, None
+    except Exception as e:
+        return None, f"Recognition error: {e}"
+
+def cosine_similarity(a, b):
+    a = np.array(a)
+    b = np.array(b)
+    return float(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b)))
+
+# ─────────────────────────────────────────────
+# ROUTES — PUBLIC
+# ─────────────────────────────────────────────
 @app.route('/')
 def index():
     return redirect(url_for('verify'))
 
+@app.route('/verify', methods=['GET', 'POST'])
+def verify():
+    if request.method == 'POST':
+        image_data = request.form.get('image')
+        if not image_data:
+            return jsonify({'success': False, 'message': 'No image received.'})
+
+        header, encoded = image_data.split(",", 1)
+        img = cv2.imdecode(np.frombuffer(base64.b64decode(encoded), np.uint8), cv2.IMREAD_COLOR)
+
+        embedding, error = get_face_embedding(img)
+        if error:
+            return jsonify({'success': False, 'message': error})
+
+        conn = sqlite3.connect(DB_PATH)
+        users = conn.execute('SELECT name, embedding FROM users').fetchall()
+        conn.close()
+
+        if not users:
+            return jsonify({'success': False, 'message': 'No users registered yet.'})
+
+        best_score = 0
+        best_user = None
+
+        for name, saved_embedding_str in users:
+            if not saved_embedding_str:
+                continue
+            try:
+                saved_emb = np.array(json.loads(saved_embedding_str))
+                score = cosine_similarity(embedding, saved_emb)
+                if score > best_score:
+                    best_score = score
+                    best_user = name
+            except Exception:
+                continue
+
+        # ArcFace cosine similarity threshold ~0.28 is typical
+        if best_score > 0.28:
+            return jsonify({'success': True, 'message': f'Welcome, {best_user}! ({int(best_score * 100)}% match)'})
+        else:
+            return jsonify({'success': False, 'message': 'Identity not recognized. Please try again.'})
+
+    return render_template('verify.html')
+
+# ─────────────────────────────────────────────
+# ROUTES — ADMIN ONLY
+# ─────────────────────────────────────────────
 @app.route('/login', methods=['GET', 'POST'])
 def login():
     if request.method == 'POST':
         if request.form.get('username') == 'havish' and request.form.get('password') == 'havishfp007':
             session['admin_logged_in'] = True
             return redirect(url_for('dashboard'))
-        else:
-            flash('Invalid credentials', 'error')
+        flash('Invalid credentials. Please try again.', 'error')
     return render_template('login.html')
 
 @app.route('/logout')
 def logout():
     session.pop('admin_logged_in', None)
+    flash('Logged out successfully.', 'info')
     return redirect(url_for('verify'))
 
 @app.route('/dashboard')
 @login_required
 def dashboard():
     conn = sqlite3.connect(DB_PATH)
-    # Added created_at to avoid IndexError in template
     users = conn.execute('SELECT id, name, image_path, created_at FROM users').fetchall()
     conn.close()
     return render_template('dashboard.html', users=users)
 
-@app.route('/delete_user/<int:id>', methods=['POST'])
-@login_required
-def delete_user(id):
-    conn = sqlite3.connect(DB_PATH)
-    user = conn.execute('SELECT image_path FROM users WHERE id = ?', (id,)).fetchone()
-    if user:
-        # We don't delete from /tmp as it's ephemeral, but we could
-        conn.execute('DELETE FROM users WHERE id = ?', (id,))
-        conn.commit()
-    conn.close()
-    flash('User deleted successfully', 'success')
-    return redirect(url_for('dashboard'))
-
-@app.route('/update_user/<int:id>', methods=['GET', 'POST'])
-@login_required
-def update_user(id):
-    # For now, just a placeholder or basic edit
-    if request.method == 'POST':
-        name = request.form.get('name')
-        conn = sqlite3.connect(DB_PATH)
-        conn.execute('UPDATE users SET name = ? WHERE id = ?', (name, id))
-        conn.commit()
-        conn.close()
-        flash('User updated', 'success')
-        return redirect(url_for('dashboard'))
-    
-    conn = sqlite3.connect(DB_PATH)
-    user = conn.execute('SELECT id, name FROM users WHERE id = ?', (id,)).fetchone()
-    conn.close()
-    return render_template('register.html', user=user) # Reuse register for edit
-
-# Global variable for Mediapipe model
-face_embedder = None
-MODEL_URL = "https://storage.googleapis.com/mediapipe-models/face_embedder/face_embedder/float16/1/face_embedder.task"
-MODEL_PATH = "/tmp/face_embedder.task"
-
-def get_face_embedder():
-    global face_embedder
-    if face_embedder is None:
-        try:
-            import mediapipe as mp
-            from mediapipe.tasks import python
-            from mediapipe.tasks.python import vision
-            import requests
-
-            # Download model if not exists
-            if not os.path.exists(MODEL_PATH):
-                print("Downloading Mediapipe Face Embedder model...")
-                r = requests.get(MODEL_URL, allow_redirects=True)
-                with open(MODEL_PATH, 'wb') as f:
-                    f.write(r.content)
-            
-            base_options = python.BaseOptions(model_asset_path=MODEL_PATH)
-            options = vision.FaceEmbedderOptions(base_options=base_options)
-            face_embedder = vision.FaceEmbedder.create_from_options(options)
-        except Exception as e:
-            print(f"Error initializing Mediapipe: {e}")
-    return face_embedder
-
-# ---------- FACE DETECTION & EMBEDDING ----------
-def get_face_embedding(img):
-    if img is None: return None
-    embedder = get_face_embedder()
-    if embedder is None: return None
-    
-    import mediapipe as mp
-    # Convert OpenCV BGR to RGB
-    try:
-        rgb_img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-        mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_img)
-        result = embedder.embed(mp_image)
-    except Exception as e:
-        print(f"Embedding error: {e}")
-        return None
-    
-    if not result.embeddings:
-        return None
-    
-    # If multiple faces are detected, result.embeddings will have multiple entries
-    if len(result.embeddings) > 1:
-        return "multiple"
-
-    return result.embeddings[0].float_vector
-
-# ---------- COSINE SIMILARITY ----------
-def compare_embeddings(emb1, emb2):
-    if emb1 is None or emb2 is None: return 0
-    # Use numpy for cosine similarity
-    emb1 = np.array(emb1)
-    emb2 = np.array(emb2)
-    sim = np.dot(emb1, emb2) / (np.linalg.norm(emb1) * np.linalg.norm(emb2))
-    return sim
-
-# ---------- REGISTER ----------
 @app.route('/register', methods=['GET', 'POST'])
 @login_required
 def register():
     if request.method == 'POST':
-        name = request.form.get('name')
+        name = request.form.get('name', '').strip()
         image_data = request.form.get('image')
+
+        if not name:
+            return jsonify({'success': False, 'message': 'Please enter a name.'})
+        if not image_data:
+            return jsonify({'success': False, 'message': 'No image received.'})
 
         header, encoded = image_data.split(",", 1)
         img = cv2.imdecode(np.frombuffer(base64.b64decode(encoded), np.uint8), cv2.IMREAD_COLOR)
 
-        embedding = get_face_embedding(img)
+        embedding, error = get_face_embedding(img)
+        if error:
+            return jsonify({'success': False, 'message': error})
 
-        if embedding is None:
-            return jsonify({'success': False, 'message': 'No face detected'})
-        if embedding == "multiple":
-            return jsonify({'success': False, 'message': 'Multiple faces detected'})
-
-        # Save the original image
-        filename = f"{name}_{os.urandom(4).hex()}.jpg"
+        filename = f"{name.replace(' ', '_')}_{os.urandom(4).hex()}.jpg"
         path = os.path.join(FACES_DIR, filename)
         cv2.imwrite(path, img)
 
-        # Store embedding as JSON string for fast comparison
-        import json
-        embedding_str = json.dumps(embedding.tolist() if isinstance(embedding, np.ndarray) else embedding)
+        embedding_str = json.dumps(embedding.tolist() if isinstance(embedding, np.ndarray) else list(embedding))
 
         conn = sqlite3.connect(DB_PATH)
         conn.execute('INSERT INTO users (name, image_path, embedding) VALUES (?, ?, ?)', (name, path, embedding_str))
         conn.commit()
         conn.close()
 
-        return jsonify({'success': True, 'message': 'User registered'})
+        return jsonify({'success': True, 'message': f'{name} registered successfully!'})
 
     return render_template('register.html')
 
-# ---------- VERIFY ----------
-@app.route('/verify', methods=['GET', 'POST'])
-def verify():
+@app.route('/delete_user/<int:id>', methods=['POST'])
+@login_required
+def delete_user(id):
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute('DELETE FROM users WHERE id = ?', (id,))
+    conn.commit()
+    conn.close()
+    flash('User deleted successfully.', 'success')
+    return redirect(url_for('dashboard'))
+
+@app.route('/update_user/<int:id>', methods=['GET', 'POST'])
+@login_required
+def update_user(id):
+    conn = sqlite3.connect(DB_PATH)
     if request.method == 'POST':
-        image_data = request.form.get('image')
-
-        header, encoded = image_data.split(",", 1)
-        img = cv2.imdecode(np.frombuffer(base64.b64decode(encoded), np.uint8), cv2.IMREAD_COLOR)
-
-        embedding = get_face_embedding(img)
-
-        if embedding is None:
-            return jsonify({'success': False, 'message': 'No face detected'})
-        if embedding == "multiple":
-            return jsonify({'success': False, 'message': 'Multiple faces detected'})
-
-        conn = sqlite3.connect(DB_PATH)
-        users = conn.execute('SELECT name, embedding FROM users').fetchall()
-        conn.close()
-
-        best_score = 0
-        best_user = None
-
-        import json
-        for name, saved_embedding_str in users:
-            if not saved_embedding_str: continue
-            
-            try:
-                saved_embedding = np.array(json.loads(saved_embedding_str))
-                score = compare_embeddings(embedding, saved_embedding)
-                
-                if score > best_score:
-                    best_score = score
-                    best_user = name
-            except:
-                continue
-
-        # Threshold for Mediapipe (0.75-0.8 is usually accurate)
-        if best_score > 0.75:
-            return jsonify({'success': True, 'message': f'Verified: {best_user} ({int(best_score*100)}% match)'})
-        else:
-            return jsonify({'success': False, 'message': 'Identity not recognized'})
-
-    return render_template('verify.html')
+        name = request.form.get('name', '').strip()
+        if name:
+            conn.execute('UPDATE users SET name = ? WHERE id = ?', (name, id))
+            conn.commit()
+            conn.close()
+            flash('User name updated.', 'success')
+            return redirect(url_for('dashboard'))
+    user = conn.execute('SELECT id, name FROM users WHERE id = ?', (id,)).fetchone()
+    conn.close()
+    return render_template('update_user.html', user=user)
 
 if __name__ == '__main__':
     app.run(host="0.0.0.0", port=10000)
