@@ -2,5 +2,4 @@ flask
 gunicorn
 numpy
 opencv-python-headless
-mediapipe
-requests
+uniface
