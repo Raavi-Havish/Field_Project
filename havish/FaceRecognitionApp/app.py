@@ -57,9 +57,12 @@ def login_required(f):
 # ─────────────────────────────────────────────
 _detector = None
 _recognizer = None
+_model_error = None
 
 def get_models():
-    global _detector, _recognizer
+    global _detector, _recognizer, _model_error
+    if _model_error:  # Don't retry if we know it failed
+        return None, None
     if _detector is None or _recognizer is None:
         try:
             from uniface.detection import RetinaFace
@@ -68,7 +71,9 @@ def get_models():
             _recognizer = ArcFace()
             print("UniFace models loaded successfully.")
         except Exception as e:
+            _model_error = str(e)
             print(f"CRITICAL: Failed to load UniFace models: {e}")
+            return None, None
     return _detector, _recognizer
 
 def get_face_embedding(img):
@@ -78,7 +83,8 @@ def get_face_embedding(img):
 
     detector, recognizer = get_models()
     if detector is None or recognizer is None:
-        return None, "Face recognition system initializing. Try again in a moment."
+        err = _model_error or "Unknown error loading models"
+        return None, f"Face recognition system error: {err}"
 
     try:
         # detect() returns (boxes, kpss)
@@ -106,6 +112,14 @@ def cosine_similarity(a, b):
 # ─────────────────────────────────────────────
 # ROUTES — PUBLIC
 # ─────────────────────────────────────────────
+@app.route('/health')
+def health():
+    """Diagnostic endpoint — check if models are loaded."""
+    detector, recognizer = get_models()
+    if detector and recognizer:
+        return jsonify({'status': 'ok', 'models': 'loaded'})
+    return jsonify({'status': 'error', 'detail': _model_error or 'Models not loaded'}), 500
+
 @app.route('/')
 def index():
     return redirect(url_for('verify'))
