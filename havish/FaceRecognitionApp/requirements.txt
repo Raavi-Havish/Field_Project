@@ -2,4 +2,5 @@ flask
 gunicorn
 numpy
 opencv-python-headless
+onnxruntime
 uniface
