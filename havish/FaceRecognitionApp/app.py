@@ -15,8 +15,7 @@ FACES_DIR = 'static/faces'
 os.makedirs('database', exist_ok=True)
 os.makedirs(FACES_DIR, exist_ok=True)
 
-# ✅ OpenCV face detector (NO mediapipe)
-face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
+from deepface import DeepFace
 
 def init_db():
     conn = sqlite3.connect(DB_PATH)
@@ -71,26 +70,38 @@ def dashboard():
 
 # ---------- FACE DETECTION ----------
 def detect_single_face(img):
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    faces = face_cascade.detectMultiScale(gray, 1.3, 5)
+    try:
+        # Using retinaface for better accuracy, or opencv for speed
+        results = DeepFace.extract_faces(img, detector_backend='opencv', enforce_detection=False)
+        
+        if len(results) == 0 or results[0]['confidence'] < 0.9:
+            return None
+        
+        if len(results) > 1:
+            return "multiple"
 
-    if len(faces) == 0:
+        # Return the face crop as a numpy array (BGR)
+        face = results[0]['face']
+        # DeepFace returns face in 0-1 range sometimes depending on version, 
+        # but usually it's a normalized float array or uint8. 
+        # We need it in uint8 for cv2.imwrite if we use it that way.
+        if face.dtype == np.float32 or face.dtype == np.float64:
+            face = (face * 255).astype(np.uint8)
+            
+        return face
+    except Exception as e:
+        print(f"Detection error: {e}")
         return None
-    if len(faces) > 1:
-        return "multiple"
-
-    (x, y, w, h) = faces[0]
-    return img[y:y+h, x:x+w]
 
 # ---------- IMAGE COMPARISON ----------
 def compare_faces(img1, img2):
-    img1 = cv2.resize(img1, (200, 200))
-    img2 = cv2.resize(img2, (200, 200))
-
-    hist1 = cv2.calcHist([img1], [0], None, [256], [0,256])
-    hist2 = cv2.calcHist([img2], [0], None, [256], [0,256])
-
-    return cv2.compareHist(hist1, hist2, cv2.HISTCMP_CORREL)
+    try:
+        # Using ArcFace model for state-of-the-art accuracy
+        result = DeepFace.verify(img1, img2, model_name='ArcFace', detector_backend='opencv', enforce_detection=False)
+        return result['verified'], result['distance']
+    except Exception as e:
+        print(f"Comparison error: {e}")
+        return False, 1.0
 
 # ---------- REGISTER ----------
 @app.route('/register', methods=['GET', 'POST'])
@@ -143,18 +154,18 @@ def verify():
         users = conn.execute('SELECT name, image_path FROM users').fetchall()
         conn.close()
 
-        best_score = -1
+        best_distance = 1.0
         best_user = None
 
         for name, path in users:
             saved = cv2.imread(path)
-            score = compare_faces(face, saved)
+            is_match, distance = compare_faces(face, saved)
 
-            if score > best_score:
-                best_score = score
+            if is_match and distance < best_distance:
+                best_distance = distance
                 best_user = name
 
-        if best_score > 0.7:
+        if best_user:
             return jsonify({'success': True, 'message': f'User: {best_user}'})
         else:
             return jsonify({'success': False, 'message': 'No match'})
