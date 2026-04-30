@@ -68,41 +68,61 @@ def dashboard():
     conn.close()
     return render_template('dashboard.html', users=users)
 
-# Global variable for InsightFace model
-face_app = None
+# Global variable for Mediapipe model
+face_embedder = None
+MODEL_URL = "https://storage.googleapis.com/mediapipe-models/face_embedder/face_embedder/float16/1/face_embedder.task"
+MODEL_PATH = "/tmp/face_embedder.task"
 
-def get_face_app():
-    global face_app
-    if face_app is None:
+def get_face_embedder():
+    global face_embedder
+    if face_embedder is None:
         try:
-            from insightface.app import FaceAnalysis
-            # Use 'buffalo_sc' for a good balance of size and accuracy on Lambda
-            # Models are stored in /tmp to comply with Lambda's read-only filesystem
-            face_app = FaceAnalysis(name='buffalo_sc', root='/tmp/.insightface', providers=['CPUExecutionProvider'])
-            face_app.prepare(ctx_id=0, det_size=(640, 640))
+            import mediapipe as mp
+            from mediapipe.tasks import python
+            from mediapipe.tasks.python import vision
+            import requests
+
+            # Download model if not exists
+            if not os.path.exists(MODEL_PATH):
+                print("Downloading Mediapipe Face Embedder model...")
+                r = requests.get(MODEL_URL, allow_redirects=True)
+                with open(MODEL_PATH, 'wb') as f:
+                    f.write(r.content)
+            
+            base_options = python.BaseOptions(model_asset_path=MODEL_PATH)
+            options = vision.FaceEmbedderOptions(base_options=base_options)
+            face_embedder = vision.FaceEmbedder.create_from_options(options)
         except Exception as e:
-            print(f"Error initializing InsightFace: {e}")
-    return face_app
+            print(f"Error initializing Mediapipe: {e}")
+    return face_embedder
 
 # ---------- FACE DETECTION & EMBEDDING ----------
 def get_face_embedding(img):
-    app = get_face_app()
-    if app is None: return None
+    embedder = get_face_embedder()
+    if embedder is None: return None
     
-    faces = app.get(img)
+    import mediapipe as mp
+    # Convert OpenCV BGR to RGB
+    rgb_img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+    mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_img)
     
-    if len(faces) == 0:
+    result = embedder.embed(mp_image)
+    
+    if not result.embeddings:
         return None
-    if len(faces) > 1:
+    
+    # If multiple faces are detected, result.embeddings will have multiple entries
+    if len(result.embeddings) > 1:
         return "multiple"
 
-    # Return the embedding vector
-    return faces[0].embedding
+    return result.embeddings[0].float_vector
 
 # ---------- COSINE SIMILARITY ----------
 def compare_embeddings(emb1, emb2):
     if emb1 is None or emb2 is None: return 0
-    # Cosine similarity formula
+    # Use numpy for cosine similarity
+    emb1 = np.array(emb1)
+    emb2 = np.array(emb2)
     sim = np.dot(emb1, emb2) / (np.linalg.norm(emb1) * np.linalg.norm(emb2))
     return sim
 
@@ -171,8 +191,8 @@ def verify():
                     best_score = score
                     best_user = name
 
-        # Threshold for ArcFace (buffalo_sc) cosine similarity is usually around 0.4-0.5
-        if best_score > 0.45:
+        # Threshold for Mediapipe Face Embedder cosine similarity is usually around 0.8
+        if best_score > 0.8:
             return jsonify({'success': True, 'message': f'User: {best_user}'})
         else:
             return jsonify({'success': False, 'message': 'No match'})
