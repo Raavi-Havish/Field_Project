@@ -1,34 +1,26 @@
 {% extends "base.html" %}
-{% block title %}Update User - FaceAuth{% endblock %}
+{% block title %}Edit User - FaceAuth{% endblock %}
 
 {% block content %}
 <div class="animate-fade-in">
     <div class="page-header">
-        <h2 class="page-title">Update User Details</h2>
+        <h2 class="page-title">Edit User</h2>
         <a href="{{ url_for('dashboard') }}" class="btn btn-outline-secondary">
-            <i class="fa-solid fa-arrow-left"></i> Back to Dashboard
+            <i class="fa-solid fa-arrow-left"></i> Back to Admin Panel
         </a>
     </div>
 
     <div class="row justify-content-center">
-        <div class="col-md-6 col-lg-5">
+        <div class="col-md-5">
             <div class="glass-card">
-                <div class="text-center mb-4">
-                    <div class="avatar-wrapper mx-auto mb-3" style="width: 80px; height: 80px;">
-                        <i class="fa-solid fa-user-pen text-primary" style="font-size: 3rem; line-height: 80px;"></i>
-                    </div>
-                    <h4 class="mb-1">Edit User</h4>
-                    <p class="text-muted">Update information for #{{ user[0] }}</p>
-                </div>
-                
+                <h5 class="mb-4"><i class="fa-solid fa-pen-to-square me-2"></i>Update Name</h5>
                 <form method="POST" action="{{ url_for('update_user', id=user[0]) }}">
                     <div class="mb-4">
-                        <label for="userName" class="form-label">Full Name</label>
-                        <input type="text" class="form-control" id="userName" name="name" value="{{ user[1] }}" required>
+                        <label for="name" class="form-label">Full Name</label>
+                        <input type="text" class="form-control" id="name" name="name" value="{{ user[1] }}" required>
                     </div>
-                    
-                    <button type="submit" class="btn btn-primary-custom w-100 py-2">
-                        <i class="fa-solid fa-floppy-disk me-2"></i> Save Changes
+                    <button type="submit" class="btn btn-primary-custom w-100">
+                        <i class="fa-solid fa-floppy-disk me-2"></i>Save Changes
                     </button>
                 </form>
             </div>
