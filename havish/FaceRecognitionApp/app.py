@@ -98,15 +98,19 @@ def get_face_embedder():
 
 # ---------- FACE DETECTION & EMBEDDING ----------
 def get_face_embedding(img):
+    if img is None: return None
     embedder = get_face_embedder()
     if embedder is None: return None
     
     import mediapipe as mp
     # Convert OpenCV BGR to RGB
-    rgb_img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-    mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_img)
-    
-    result = embedder.embed(mp_image)
+    try:
+        rgb_img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_img)
+        result = embedder.embed(mp_image)
+    except Exception as e:
+        print(f"Embedding error: {e}")
+        return None
     
     if not result.embeddings:
         return None
@@ -183,9 +187,12 @@ def verify():
 
         for name, path in users:
             saved_img = cv2.imread(path)
+            if saved_img is None: continue
+            
             saved_embedding = get_face_embedding(saved_img)
             
-            if isinstance(saved_embedding, np.ndarray):
+            # Mediapipe returns a list (float_vector)
+            if saved_embedding and not isinstance(saved_embedding, str):
                 score = compare_embeddings(embedding, saved_embedding)
                 if score > best_score:
                     best_score = score
